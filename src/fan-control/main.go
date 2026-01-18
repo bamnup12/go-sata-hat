@@ -15,37 +15,52 @@ import (
 )
 
 var (
-    fans = [2] rpio.Pin {rpio.Pin(common.CPU_FAN_PIN), rpio.Pin(common.DISK_FAN_PIN)}
+    fans          = [2]rpio.Pin{rpio.Pin(common.CPU_FAN_PIN), rpio.Pin(common.DISK_FAN_PIN)}
     current_level uint32
-    MIN, _ = strconv.ParseFloat(common.GetEnv("TEMP_MIN", "35.0"), 64)
-    MED, _ = strconv.ParseFloat(common.GetEnv("TEMP_MED", "50.0"), 64)
-    MAX, _ = strconv.ParseFloat(common.GetEnv("TEMP_MAX", "55.0"), 64)
+    MIN, _        = strconv.ParseFloat(common.GetEnv("TEMP_MIN", "35.0"), 64)
+    MED, _        = strconv.ParseFloat(common.GetEnv("TEMP_MED", "50.0"), 64)
+    MAX, _        = strconv.ParseFloat(common.GetEnv("TEMP_MAX", "55.0"), 64)
+    BUFFER, _     = strconv.ParseFloat(common.GetEnv("TEMP_BUFFER", "2.0"), 64)
 )
 
 func setFan(fan int, level uint32) {
-    log.Print(fmt.Sprintf("Setting fan %d to level %d\n", fan, level))
+    log.Printf("Setting fan %d to level %d\n", fan, level)
     fans[fan].Mode(rpio.Pwm)
     fans[fan].Freq(100000)
     fans[fan].DutyCycle(level, 4)
 }
 
+// calculateLevel determines the appropriate fan level based on temperature
+// with hysteresis to prevent rapid switching
+func calculateLevel(temp float64, currentLevel uint32) uint32 {
+    // Thresholds with hysteresis applied based on current level
+    // When going up in speed, use normal thresholds
+    // When going down in speed, use threshold - buffer
+    thresholds := map[uint32][3]float64{
+        1: {MIN, MED, MAX},          // From level 1: normal thresholds
+        2: {MIN - BUFFER, MED, MAX}, // From level 2: buffer on MIN
+        3: {MIN, MED - BUFFER, MAX}, // From level 3: buffer on MED
+        4: {MIN, MED, MAX - BUFFER}, // From level 4: buffer on MAX
+    }
+
+    t := thresholds[currentLevel]
+
+    if temp >= t[2] {
+        return 4
+    } else if temp >= t[1] {
+        return 3
+    } else if temp >= t[0] {
+        return 2
+    }
+    return 1
+}
+
 func setLevel() {
-    var level uint32 = 2
-    var temperature = common.ReadTemp()
-    if temperature >= MAX {
-        level = 4
-    }
-    if temperature <= MAX {
-        level = 3
-    }
-    if temperature <= MED {
-        level = 2
-    }
-    if temperature <= MIN {
-        level = 1
-    }
+    temperature := common.ReadTemp()
+    level := calculateLevel(temperature, current_level)
+
     if current_level != level {
-        log.Print(fmt.Sprintf("Current temperature is %.0f°C\n", temperature))
+        log.Printf("Current temperature is %.1f°C (buffer: %.1f°C)\n", temperature, BUFFER)
         setFan(0, level)
         setFan(1, level)
         current_level = level
@@ -65,13 +80,13 @@ func main() {
 
     // Install signal handler
     signal_chan := make(chan os.Signal, 1)
-    signal.Notify(signal_chan, os.Interrupt, os.Kill, syscall.SIGTERM)
+    signal.Notify(signal_chan, os.Interrupt, syscall.SIGTERM)
 
     go func() {
         for {
             s := <-signal_chan
             switch s {
-            case os.Interrupt, os.Kill, syscall.SIGTERM:
+            case os.Interrupt, syscall.SIGTERM:
                 log.Print("Exiting...")
                 rpio.Close()
                 os.Exit(0)
@@ -102,3 +117,4 @@ func main() {
         }
     }
 }
+
